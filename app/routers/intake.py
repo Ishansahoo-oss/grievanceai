@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -20,7 +20,9 @@ from app.models import (
     Grievance,
     GrievanceStatus,
     Priority,
+    ProcessedMessage,
     StatusHistory,
+    User,
     new_tracking_id,
 )
 from app.schemas import IntakeResponse, WebIntakeRequest
@@ -46,6 +48,12 @@ CATEGORY_TO_DEPARTMENT = {
 # Cosine distance threshold for treating two complaints as duplicates.
 # distance < 0.15  <=>  cosine similarity > 0.85
 DUPLICATE_DISTANCE_THRESHOLD = 0.15
+
+# Classification confidence below this means: don't auto-route to a
+# department. Instead the ticket is created with department_id=None and
+# needs_human_review=True, so it shows up in a human triage queue
+# (GET /admin/queue with department_id omitted + needs_human_review filter).
+ROUTING_CONFIDENCE_THRESHOLD = 0.6
 
 
 def _safe_classify(text: str) -> dict:
@@ -113,10 +121,11 @@ def _create_grievance(
     address: Optional[str],
     lat: Optional[float],
     lng: Optional[float],
+    user_id: Optional[int] = None,
 ) -> Grievance:
     """
     Shared creation flow used by both /intake/web and the WhatsApp webhook:
-    classify -> embed -> dedupe-check -> create-or-merge.
+    classify -> embed -> dedupe-check -> route-or-triage -> create-or-merge.
     Returns the Grievance that should be reported back to the caller
     (either a brand-new one, or the existing one it was merged into).
     The caller can distinguish "merged" by checking whether the returned
@@ -132,7 +141,7 @@ def _create_grievance(
         confidence = float(data.get("confidence", 0.0))
         subcategory = data.get("subcategory")
         summary = data.get("summary") or description[:140]
-        needs_human_review = confidence < 0.6
+        needs_human_review = confidence < ROUTING_CONFIDENCE_THRESHOLD
     else:
         category = Category.other
         priority = Priority.medium
@@ -149,10 +158,15 @@ def _create_grievance(
             duplicate._merged = True  # transient flag, not persisted
             return duplicate
 
-    department = _department_for_category(db, category)
+    # Below the confidence threshold: don't auto-route. The ticket is
+    # created with no department assigned and needs_human_review=True,
+    # so an officer/admin can triage and assign it manually via
+    # PATCH /admin/grievance/{id}.
+    department = None if needs_human_review else _department_for_category(db, category)
 
     grievance = Grievance(
         tracking_id=new_tracking_id(),
+        user_id=user_id,
         category=category,
         subcategory=subcategory,
         description=description,
@@ -232,4 +246,87 @@ def intake_web(payload: WebIntakeRequest, db: Session = Depends(get_db)):
         lat=payload.lat,
         lng=payload.lng,
     )
+    return _to_intake_response(grievance, db)
+
+
+def _extract_whatsapp_message(payload: dict) -> Optional[dict]:
+    """
+    Defensively parses a WhatsApp Business API webhook payload and pulls
+    out the message id, sender id, and text body. Returns None if this
+    payload isn't a text message we can handle yet (e.g. a status/delivery
+    callback, or an audio/image message — those come in a later step).
+
+    Phase 1 assumes text messages only, per the spec.
+    """
+    try:
+        entry = payload.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
+        value = change.get("value", {})
+        messages = value.get("messages")
+        if not messages:
+            return None  # e.g. a delivery/read status callback, not a message
+
+        message = messages[0]
+        if message.get("type") != "text":
+            return None  # audio/image handled in a later phase
+
+        message_id = message.get("id")
+        whatsapp_id = message.get("from")
+        text = (message.get("text") or {}).get("body")
+
+        if not message_id or not text:
+            return None
+
+        return {"message_id": message_id, "whatsapp_id": whatsapp_id, "text": text}
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+
+@router.post("/intake/whatsapp/webhook")
+def intake_whatsapp_webhook(payload: dict = Body(...), db: Session = Depends(get_db)):
+    parsed = _extract_whatsapp_message(payload)
+    if parsed is None:
+        # Not a text message we handle yet (status callback, unsupported
+        # media type, malformed payload, ...). Ack with 200 and do nothing,
+        # same as WhatsApp expects for any webhook it doesn't need retried.
+        return {"ok": True}
+
+    message_id = parsed["message_id"]
+
+    # Idempotency: atomically claim this message_id. If it's already been
+    # processed, INSERT will violate the unique constraint and we return
+    # 200 having done nothing else, per the spec. Doing this as an
+    # insert-and-catch (rather than check-then-insert) avoids a race
+    # condition between two nearly-simultaneous deliveries of the same
+    # webhook, which WhatsApp does occasionally send.
+    try:
+        db.add(ProcessedMessage(message_id=message_id))
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        return {"ok": True}
+
+    whatsapp_id = parsed["whatsapp_id"]
+    user = None
+    if whatsapp_id:
+        user = db.query(User).filter(User.whatsapp_id == whatsapp_id).first()
+        if user is None:
+            user = User(whatsapp_id=whatsapp_id)
+            db.add(user)
+            db.flush()
+
+    try:
+        grievance = _create_grievance(
+            db,
+            description=parsed["text"],
+            original_text=parsed["text"],
+            language=None,
+            address=None,
+            lat=None,
+            lng=None,
+            user_id=user.id if user else None,
+        )
+    except Exception:
+        db.rollback()
+        raise
     return _to_intake_response(grievance, db)
