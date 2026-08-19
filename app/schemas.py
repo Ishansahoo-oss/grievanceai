@@ -25,6 +25,8 @@ __all__ = [
     "VerifyResponse",
     "QueueItem",
     "AdminUpdateRequest",
+    "EscalateRequest",
+    "EscalateResponse",
 ]
 
 
@@ -107,3 +109,16 @@ class AdminUpdateRequest(BaseModel):
     status: GrievanceStatus
     note: Optional[str] = None
     changed_by: Optional[str] = None
+
+
+class EscalateRequest(BaseModel):
+    reason: Optional[str] = None
+    escalated_to: Optional[str] = None
+    changed_by: Optional[str] = None
+
+
+class EscalateResponse(BaseModel):
+    tracking_id: str
+    status: GrievanceStatus
+    escalated_to: Optional[str] = None
+    reason: Optional[str] = None

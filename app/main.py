@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.db import init_db
+from app.scheduler import start_scheduler, stop_scheduler
 
 logger = logging.getLogger("grievanceai")
 
@@ -49,6 +50,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.on_event("startup")
 def on_startup():
     init_db()
+    start_scheduler(interval_minutes=5)
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    stop_scheduler()
 
 
 @app.get("/health")

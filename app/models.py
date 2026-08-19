@@ -55,6 +55,16 @@ OPEN_STATUSES = (
     GrievanceStatus.escalated,
 )
 
+# Statuses eligible for SLA-breach auto-escalation. Deliberately excludes
+# `escalated` itself — otherwise an overdue ticket that's already been
+# escalated would get re-escalated (and re-logged) on every scheduler
+# tick forever, since it stays overdue by definition once breached.
+ESCALATABLE_STATUSES = (
+    GrievanceStatus.new,
+    GrievanceStatus.assigned,
+    GrievanceStatus.in_progress,
+)
+
 
 class Priority(str, enum.Enum):
     low = "low"

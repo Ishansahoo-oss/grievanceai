@@ -7,8 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Category, Department, Grievance, GrievanceStatus, Priority, StatusHistory
-from app.schemas import AdminUpdateRequest, QueueItem
+from app.models import Category, Department, Escalation, Grievance, GrievanceStatus, Priority, StatusHistory
+from app.schemas import AdminUpdateRequest, EscalateRequest, EscalateResponse, QueueItem
 
 router = APIRouter(tags=["admin"])
 
@@ -87,4 +87,55 @@ def update_grievance(id: int, payload: AdminUpdateRequest, db: Session = Depends
         needs_human_review=grievance.needs_human_review,
         created_at=grievance.created_at,
         sla_due_at=grievance.sla_due_at,
+    )
+
+
+@router.post("/admin/grievance/{id}/escalate", response_model=EscalateResponse)
+def escalate_grievance(id: int, payload: EscalateRequest, db: Session = Depends(get_db)):
+    """
+    Manual escalation, triggered by an officer regardless of whether the
+    SLA has actually been breached (e.g. a citizen is threatening legal
+    action, a VIP complaint, media attention, etc.) — distinct from the
+    automatic SLA-breach escalation the scheduler runs periodically.
+    """
+    grievance = db.get(Grievance, id)
+    if grievance is None:
+        raise HTTPException(status_code=404, detail="Grievance not found")
+
+    department_name = None
+    department_contact = None
+    if grievance.department_id:
+        dept = db.get(Department, grievance.department_id)
+        if dept:
+            department_name = dept.name
+            department_contact = dept.escalation_contact
+
+    escalated_to = payload.escalated_to or department_contact or "unassigned_escalation_contact"
+    reason = payload.reason or "Manual escalation by officer"
+
+    db.add(
+        Escalation(
+            grievance_id=grievance.id,
+            escalated_from=department_name,
+            escalated_to=escalated_to,
+            reason=reason,
+        )
+    )
+    grievance.status = GrievanceStatus.escalated
+    db.add(
+        StatusHistory(
+            grievance_id=grievance.id,
+            status=GrievanceStatus.escalated,
+            changed_by=payload.changed_by or "admin",
+            note=reason,
+        )
+    )
+    db.commit()
+    db.refresh(grievance)
+
+    return EscalateResponse(
+        tracking_id=grievance.tracking_id,
+        status=grievance.status,
+        escalated_to=escalated_to,
+        reason=reason,
     )
