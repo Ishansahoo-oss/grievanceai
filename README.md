@@ -1,82 +1,171 @@
 # GrievanceAI Backend
 
-Phase 2 adds the mocked AI client and `POST /intake/web`.
+FastAPI backend for an AI-based civic grievance system. Citizens report
+complaints via web or WhatsApp; an AI layer classifies and routes them
+to city departments; the system tracks them through resolution with
+SLA-based escalation and supports multi-department complaint splitting.
 
-## Start PostgreSQL + pgvector
+Stack: Python (FastAPI), PostgreSQL + pgvector, SQLAlchemy, Pydantic,
+APScheduler.
 
-```powershell
-docker run --name grievanceai-db `
-  -e POSTGRES_PASSWORD=postgres `
-  -e POSTGRES_DB=grievanceai `
-  -p 5432:5432 `
+## Local development
+
+### 1. Start Postgres with pgvector
+
+```bash
+docker run --name grievance-pg \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=grievanceai \
+  -p 5432:5432 \
   -d pgvector/pgvector:pg16
 ```
 
-If the container already exists:
+### 2. Set up your environment
 
-```powershell
-docker start grievanceai-db
+```bash
+cp .env.example .env
+# edit .env if your DATABASE_URL differs from the default
 ```
 
-## Python environment
+### 3. Install dependencies
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+Use **Python 3.12** — some pinned dependencies don't yet have prebuilt
+wheels for very new Python releases (3.13/3.14), which causes slow,
+error-prone source builds on Windows especially.
+
+```bash
+python -m venv venv
+source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-Copy-Item .env.example .env
 ```
 
-Start the API:
+### 4. Seed the departments
 
-```powershell
-uvicorn app.main:app --reload
+```bash
+python -m app.seed
 ```
 
-## Test health
+### 5. Run the server
 
-```powershell
-curl.exe http://localhost:8000/health
+```bash
+uvicorn app.main:app --reload --reload-dir app
 ```
 
-Expected:
+`--reload-dir app` scopes the file-watcher to your own code — without
+it, uvicorn also watches `venv/`, which triggers constant unnecessary
+restarts.
 
-```json
-{"ok":true}
+### 6. Verify
+
+```bash
+curl http://localhost:8000/health
+# {"ok":true}
 ```
 
-## Test web intake
+## Deploying to Railway
 
-Use `curl.exe` in PowerShell so it invokes real curl rather than PowerShell's `Invoke-WebRequest` alias:
+Railway is the easiest option here since it has ready-made templates
+with pgvector already compiled in — no custom Dockerfile needed.
 
-```powershell
-curl.exe -X POST http://localhost:8000/intake/web `
-  -H "Content-Type: application/json" `
-  -d '{"description":"There has been no water supply in our area for 3 days","address":"Bengaluru","language":"en"}'
+### 1. Push your code to GitHub
+
+Railway deploys straight from a GitHub repo.
+
+### 2. Create the database
+
+In your Railway project, deploy one of Railway's pgvector-enabled
+Postgres templates (search "pgvector" in the Railway template
+directory — e.g. "Postgres with pgVector Engine" or "Deploy PgVector").
+Avoid the plain built-in Postgres plugin — it does **not** have the
+`vector` extension available.
+
+### 3. Create the app service
+
+- **New Service → Deploy from GitHub repo** → select this repo
+- Railway auto-detects Python via Nixpacks. This repo includes
+  `railway.json`, `Procfile`, and `runtime.txt` to pin the Python
+  version and start command explicitly, so no manual build/start
+  configuration should be needed.
+
+### 4. Set environment variables on the app service
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Reference your Postgres service's connection string (Railway lets you do this via a variable reference, e.g. `${{Postgres.DATABASE_URL}}`) |
+| `GEMINI_API_KEY` | Real key once the AI service is wired up; any placeholder works for now since `ai_client.py` is currently mocked |
+| `WHATSAPP_TOKEN` | Same — placeholder is fine until the WhatsApp integration goes live |
+
+### 5. Deploy
+
+Railway builds and deploys automatically. On first boot, `init_db()`
+runs `CREATE EXTENSION IF NOT EXISTS vector` and creates all tables —
+no manual migration step needed.
+
+### 6. Seed departments on the deployed instance
+
+Easiest via the Railway CLI:
+
+```bash
+railway run python -m app.seed
 ```
 
-Expected shape:
+### 7. Verify
 
-```json
-{
-  "tracking_id": "GRV-xxxxx",
-  "status": "new",
-  "category": "water_supply",
-  "priority": "high",
-  "department": "Water Board",
-  "summary": "Water supply disruption reported.",
-  "merged": false
-}
+```bash
+curl https://<your-app>.up.railway.app/health
+# {"ok":true}
 ```
 
-Submit the same complaint again. The second request should normally return the existing tracking ID with:
+Share this URL with your frontend/AI teammates so they can start
+integrating against a live backend instead of `localhost`.
 
-```json
-{"tracking_id":"GRV-xxxxx","merged":true}
+## Deploying to Render (alternative)
+
+Render doesn't have a pgvector-enabled Postgres template out of the
+box, so you'd need to run Postgres yourself via Render's "Private
+Service" with the `pgvector/pgvector:pg16` Docker image, or use an
+external managed Postgres that supports pgvector (e.g. Supabase,
+Neon's paid tier, or your own Railway-hosted Postgres). For the web
+service itself, point Render at this repo with:
+
+- **Build command**: `pip install -r requirements.txt`
+- **Start command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+Same environment variables as above.
+
+## Project structure
+
+```
+app/
+  main.py          FastAPI app, CORS, error handlers, startup/shutdown
+  config.py        Settings loaded from .env
+  db.py            Engine/session, init_db() (extension + table creation)
+  models.py        SQLAlchemy models
+  schemas.py       Pydantic request/response models
+  ai_client.py     MOCK AI functions — swap for the real ai_service package
+  notifications.py MOCK notification dispatch
+  scheduler.py     APScheduler job: SLA breach auto-escalation
+  seed.py          Seeds the 5 departments
+  routers/
+    intake.py      POST /intake/web, POST /intake/whatsapp/webhook
+    citizen.py     GET /grievance/{tracking_id}/status, POST .../verify
+    admin.py       GET /admin/queue, PATCH/escalate endpoints
 ```
 
-The mock embedding is deterministic, but unrelated complaints will not necessarily be close enough to merge. This is only a Phase 2 mock; the real embedding service will replace it later.
+## Known mock/placeholder areas
 
-## Important
+These are intentionally mocked for now and documented with `TODO`
+comments at each call site — swap them for real implementations
+without needing to change any calling code, since the function
+signatures match the intended real contracts:
 
-Run the seed script before testing intake because department routing expects the five departments to exist. The seed endpoint/script is part of the next phase.
+- `ai_client.classify_complaint` — category/priority/confidence
+  classification, plus a naive regex-based location extractor as a
+  geotagging placeholder
+- `ai_client.embed_text` — 768-dim embedding generation
+- `ai_client.split_departments` — multi-department detection (contract
+  shape not yet confirmed with the AI team — see comment in the file)
+- `ai_client.transcribe_audio` — defined but not yet wired into the
+  WhatsApp webhook (text messages only for now)
+- `notifications.send_notification` — logs to `notifications_log`
+  instead of actually sending via WhatsApp/SMS/email
