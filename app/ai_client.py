@@ -13,6 +13,7 @@ transcription, and department-splitting) once it's available.
 """
 import hashlib
 import random
+import re
 from typing import List, Optional, TypedDict
 
 
@@ -60,6 +61,20 @@ _KEYWORD_CATEGORY_MAP = {
     "park": ("parks", "maintenance"),
 }
 
+# Naive location extractor for the mock: looks for a location preposition
+# ("near", "at", "on", "in", "around") followed by a capitalized phrase —
+# e.g. "pothole on MG Road", "flooding near Gandhi Nagar". Good enough to
+# exercise the geotagging pipeline in local dev; a real NER/geocoding call
+# would replace this.
+_LOCATION_PATTERN = re.compile(
+    r"\b(?:near|at|on|in|around)\s+([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,4})"
+)
+
+
+def _extract_location_text(text: str) -> Optional[str]:
+    match = _LOCATION_PATTERN.search(text or "")
+    return match.group(1).strip() if match else None
+
 
 def classify_complaint(text: str, image_description: Optional[str] = None) -> ClassificationResult:
     """
@@ -100,7 +115,7 @@ def classify_complaint(text: str, image_description: Optional[str] = None) -> Cl
         "subcategory": subcategory,
         "priority": priority,
         "confidence": confidence,
-        "location_text": None,
+        "location_text": _extract_location_text(text),
         "summary": summary or "Citizen complaint",
     }
 

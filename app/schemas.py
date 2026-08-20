@@ -76,6 +76,7 @@ class GrievanceStatusResponse(BaseModel):
     priority: Priority
     department: Optional[str] = None
     summary: Optional[str] = None
+    address: Optional[str] = None
     created_at: datetime
     sla_due_at: Optional[datetime] = None
     timeline: List[TimelineEntry] = []

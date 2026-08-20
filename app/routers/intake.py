@@ -296,6 +296,10 @@ def _create_grievance(
         subcategory = data.get("subcategory")
         summary = data.get("summary") or description[:140]
         needs_human_review = confidence < ROUTING_CONFIDENCE_THRESHOLD
+        # Geotagging: prefer the client-supplied address (usually GPS-
+        # derived and more precise); fall back to whatever location the
+        # AI classification extracted from the complaint text itself.
+        effective_address = address or data.get("location_text")
     else:
         category = Category.other
         priority = Priority.medium
@@ -303,6 +307,7 @@ def _create_grievance(
         subcategory = None
         summary = description[:140]
         needs_human_review = True
+        effective_address = address
 
     embedding = _safe_embed(description)
 
@@ -338,7 +343,7 @@ def _create_grievance(
                 description=description,
                 original_text=original_text,
                 language=language,
-                address=address,
+                address=effective_address,
                 lat=lat,
                 lng=lng,
                 user_id=user_id,
@@ -382,7 +387,7 @@ def _create_grievance(
         needs_human_review=needs_human_review,
         lat=lat,
         lng=lng,
-        address=address,
+        address=effective_address,
         department_id=department.id if department else None,
     )
 

@@ -55,6 +55,7 @@ def get_status(tracking_id: str, db: Session = Depends(get_db)):
         priority=grievance.priority,
         department=department_name,
         summary=grievance.description[:140],
+        address=grievance.address,
         created_at=grievance.created_at,
         sla_due_at=grievance.sla_due_at,
         timeline=timeline,
