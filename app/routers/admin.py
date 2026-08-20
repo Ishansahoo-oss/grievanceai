@@ -39,6 +39,14 @@ def get_queue(
         for dept in db.query(Department).filter(Department.id.in_(department_ids)).all():
             departments[dept.id] = dept.name
 
+    # Batch-load parent tracking_ids, so a child ticket (from Phase 3
+    # multi-department splitting) shows which bigger complaint it belongs to.
+    parent_ids = {g.parent_id for g in grievances if g.parent_id}
+    parent_tracking_ids = {}
+    if parent_ids:
+        for parent in db.query(Grievance).filter(Grievance.id.in_(parent_ids)).all():
+            parent_tracking_ids[parent.id] = parent.tracking_id
+
     return [
         QueueItem(
             tracking_id=g.tracking_id,
@@ -50,6 +58,7 @@ def get_queue(
             needs_human_review=g.needs_human_review,
             created_at=g.created_at,
             sla_due_at=g.sla_due_at,
+            parent_tracking_id=parent_tracking_ids.get(g.parent_id) if g.parent_id else None,
         )
         for g in grievances
     ]
@@ -78,6 +87,11 @@ def update_grievance(id: int, payload: AdminUpdateRequest, db: Session = Depends
         dept = db.get(Department, grievance.department_id)
         department_name = dept.name if dept else None
 
+    parent_tracking_id = None
+    if grievance.parent_id:
+        parent = db.get(Grievance, grievance.parent_id)
+        parent_tracking_id = parent.tracking_id if parent else None
+
     return QueueItem(
         tracking_id=grievance.tracking_id,
         status=grievance.status,
@@ -88,6 +102,7 @@ def update_grievance(id: int, payload: AdminUpdateRequest, db: Session = Depends
         needs_human_review=grievance.needs_human_review,
         created_at=grievance.created_at,
         sla_due_at=grievance.sla_due_at,
+        parent_tracking_id=parent_tracking_id,
     )
 
 

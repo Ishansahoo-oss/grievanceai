@@ -50,6 +50,8 @@ class IntakeResponse(BaseModel):
     department: Optional[str] = None
     summary: Optional[str] = None
     merged: bool = False
+    split: bool = False
+    subtask_tracking_ids: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +105,7 @@ class QueueItem(BaseModel):
     needs_human_review: bool
     created_at: datetime
     sla_due_at: Optional[datetime] = None
+    parent_tracking_id: Optional[str] = None
 
 
 class AdminUpdateRequest(BaseModel):

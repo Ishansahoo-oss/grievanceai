@@ -127,6 +127,140 @@ def _infer_media_type(url: str) -> str:
     return "other"
 
 
+def _resolve_department_for_category(db: Session, category_value: str) -> Optional[Department]:
+    try:
+        category = Category(category_value)
+    except ValueError:
+        category = Category.other
+    return _department_for_category(db, category)
+
+
+def _create_split_family(
+    db: Session,
+    *,
+    description: str,
+    original_text: str,
+    language: Optional[str],
+    address: Optional[str],
+    lat: Optional[float],
+    lng: Optional[float],
+    user_id: Optional[int],
+    category: Category,
+    priority: Priority,
+    confidence: float,
+    needs_human_review: bool,
+    embedding: Optional[list],
+    split_result: dict,
+) -> Grievance:
+    """
+    Creates one parent Grievance (an umbrella ticket, not assigned to any
+    single department — department_id stays None) plus one child Grievance
+    per department the AI split-check identified, each with parent_id
+    pointing back to the parent and its own department_id, tracking_id,
+    and SLA. Returns the parent, with the child tracking_ids stashed as a
+    transient attribute for the caller to surface in the API response.
+    """
+    parent = Grievance(
+        tracking_id=new_tracking_id(),
+        user_id=user_id,
+        category=category,
+        subcategory=None,
+        description=description,
+        original_text=original_text,
+        language=language,
+        priority=priority,
+        status=GrievanceStatus.new,
+        confidence=confidence,
+        needs_human_review=needs_human_review,
+        lat=lat,
+        lng=lng,
+        address=address,
+        department_id=None,  # umbrella ticket — each sub-issue is routed individually below
+    )
+
+    for attempt in range(2):
+        try:
+            db.add(parent)
+            db.flush()
+            break
+        except IntegrityError:
+            db.rollback()
+            if attempt == 1:
+                raise
+            parent.tracking_id = new_tracking_id()
+
+    db.add(
+        StatusHistory(
+            grievance_id=parent.id,
+            status=GrievanceStatus.new,
+            changed_by="system",
+            note=f"Parent grievance created via intake; split into {len(split_result['departments'])} department(s)",
+        )
+    )
+
+    if embedding is not None:
+        db.add(ComplaintVector(grievance_id=parent.id, embedding=embedding))
+
+    child_tracking_ids: list = []
+    for entry in split_result["departments"]:
+        entry_category_value = entry.get("category", "other")
+        child_department = _resolve_department_for_category(db, entry_category_value)
+        child_category = (
+            Category(entry_category_value)
+            if entry_category_value in Category._value2member_map_
+            else Category.other
+        )
+
+        child = Grievance(
+            tracking_id=new_tracking_id(),
+            parent_id=parent.id,
+            user_id=user_id,
+            category=child_category,
+            subcategory=None,
+            description=entry.get("sub_issue") or description,
+            original_text=original_text,
+            language=language,
+            priority=priority,
+            status=GrievanceStatus.new,
+            confidence=confidence,
+            needs_human_review=needs_human_review,
+            lat=lat,
+            lng=lng,
+            address=address,
+            department_id=child_department.id if child_department else None,
+        )
+        if child_department is not None:
+            child.sla_due_at = datetime.now(timezone.utc) + timedelta(hours=child_department.sla_hours)
+
+        for attempt in range(2):
+            try:
+                db.add(child)
+                db.flush()
+                break
+            except IntegrityError:
+                db.rollback()
+                if attempt == 1:
+                    raise
+                child.tracking_id = new_tracking_id()
+
+        db.add(
+            StatusHistory(
+                grievance_id=child.id,
+                status=GrievanceStatus.new,
+                changed_by="system",
+                note=f"Sub-ticket created from split of {parent.tracking_id}",
+            )
+        )
+        child_tracking_ids.append(child.tracking_id)
+
+    db.commit()
+    db.refresh(parent)
+    parent._merged = False  # transient, not persisted
+    parent._split = True  # transient, not persisted
+    parent._child_tracking_ids = child_tracking_ids  # transient, not persisted
+    return parent
+
+
 def _create_grievance(
     db: Session,
     *,
@@ -186,6 +320,45 @@ def _create_grievance(
                 )
                 db.commit()
             return duplicate
+
+    # Only worth asking "does this span multiple departments?" when
+    # classification actually succeeded — if it failed we've already
+    # fallen back to category=other/confidence=0, and there's nothing
+    # meaningful to split.
+    if classification["ok"]:
+        try:
+            split_result = ai_client.split_departments(description, classification["data"])
+        except Exception:
+            logger.exception("split_departments failed; falling back to a single ticket")
+            split_result = {"needs_split": False, "departments": []}
+
+        if split_result.get("needs_split") and len(split_result.get("departments", [])) >= 2:
+            parent = _create_split_family(
+                db,
+                description=description,
+                original_text=original_text,
+                language=language,
+                address=address,
+                lat=lat,
+                lng=lng,
+                user_id=user_id,
+                category=category,
+                priority=priority,
+                confidence=confidence,
+                needs_human_review=needs_human_review,
+                embedding=embedding,
+                split_result=split_result,
+            )
+            if media_url:
+                db.add(
+                    GrievanceMedia(
+                        grievance_id=parent.id,
+                        type=_infer_media_type(media_url),
+                        storage_url=media_url,
+                    )
+                )
+                db.commit()
+            return parent
 
     # Original spec: always route to a department, regardless of
     # confidence — low confidence just sets needs_human_review=True so
@@ -269,6 +442,8 @@ def _to_intake_response(grievance: Grievance, db: Session) -> IntakeResponse:
         department=department_name,
         summary=grievance.description[:140],
         merged=getattr(grievance, "_merged", False),
+        split=getattr(grievance, "_split", False),
+        subtask_tracking_ids=getattr(grievance, "_child_tracking_ids", []),
     )
 
 
