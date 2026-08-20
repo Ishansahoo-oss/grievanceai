@@ -18,6 +18,7 @@ from app.models import (
     ComplaintVector,
     Department,
     Grievance,
+    GrievanceMedia,
     GrievanceStatus,
     Priority,
     ProcessedMessage,
@@ -49,10 +50,11 @@ CATEGORY_TO_DEPARTMENT = {
 # distance < 0.15  <=>  cosine similarity > 0.85
 DUPLICATE_DISTANCE_THRESHOLD = 0.15
 
-# Classification confidence below this means: don't auto-route to a
-# department. Instead the ticket is created with department_id=None and
-# needs_human_review=True, so it shows up in a human triage queue
-# (GET /admin/queue with department_id omitted + needs_human_review filter).
+# Classification confidence below this means: the ticket still gets
+# created and routed normally, but needs_human_review is set to True so
+# an officer can double-check the AI's classification before/while it's
+# worked (per the original spec: "still create and route the ticket but
+# set needs_human_review=true").
 ROUTING_CONFIDENCE_THRESHOLD = 0.6
 
 
@@ -112,6 +114,19 @@ def _department_for_category(db: Session, category: Category) -> Optional[Depart
     return db.query(Department).filter(Department.name == name).first()
 
 
+def _infer_media_type(url: str) -> str:
+    """Best-effort guess at media type from the URL's file extension."""
+    filename = url.split("?", 1)[0].rsplit("/", 1)[-1]
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext in {"jpg", "jpeg", "png", "gif", "webp", "bmp"}:
+        return "image"
+    if ext in {"mp3", "wav", "ogg", "m4a", "aac"}:
+        return "audio"
+    if ext in {"mp4", "mov", "webm", "avi"}:
+        return "video"
+    return "other"
+
+
 def _create_grievance(
     db: Session,
     *,
@@ -122,6 +137,7 @@ def _create_grievance(
     lat: Optional[float],
     lng: Optional[float],
     user_id: Optional[int] = None,
+    media_url: Optional[str] = None,
 ) -> Grievance:
     """
     Shared creation flow used by both /intake/web and the WhatsApp webhook:
@@ -131,6 +147,10 @@ def _create_grievance(
     The caller can distinguish "merged" by checking whether the returned
     grievance was already persisted before this call (see `merged` flag
     set on the returned object as a transient attribute).
+
+    If media_url is provided, a GrievanceMedia row is attached to
+    whichever grievance is ultimately returned (new or merged-into) —
+    treating it as supporting evidence for that ticket either way.
     """
     classification = _safe_classify(description)
 
@@ -156,13 +176,24 @@ def _create_grievance(
         duplicate = _find_duplicate(db, embedding)
         if duplicate is not None:
             duplicate._merged = True  # transient flag, not persisted
+            if media_url:
+                db.add(
+                    GrievanceMedia(
+                        grievance_id=duplicate.id,
+                        type=_infer_media_type(media_url),
+                        storage_url=media_url,
+                    )
+                )
+                db.commit()
             return duplicate
 
-    # Below the confidence threshold: don't auto-route. The ticket is
-    # created with no department assigned and needs_human_review=True,
-    # so an officer/admin can triage and assign it manually via
-    # PATCH /admin/grievance/{id}.
-    department = None if needs_human_review else _department_for_category(db, category)
+    # Original spec: always route to a department, regardless of
+    # confidence — low confidence just sets needs_human_review=True so
+    # an officer can double-check the auto-classification, not skip
+    # routing altogether. (Earlier this held low-confidence tickets back
+    # from routing entirely, per a newer planning doc that conflicted
+    # with the original spec on this point — reverted per instruction.)
+    department = _department_for_category(db, category)
 
     grievance = Grievance(
         tracking_id=new_tracking_id(),
@@ -209,6 +240,15 @@ def _create_grievance(
     if embedding is not None:
         db.add(ComplaintVector(grievance_id=grievance.id, embedding=embedding))
 
+    if media_url:
+        db.add(
+            GrievanceMedia(
+                grievance_id=grievance.id,
+                type=_infer_media_type(media_url),
+                storage_url=media_url,
+            )
+        )
+
     db.commit()
     db.refresh(grievance)
     grievance._merged = False  # transient flag, not persisted
@@ -245,6 +285,7 @@ def intake_web(payload: WebIntakeRequest, db: Session = Depends(get_db)):
         address=payload.address,
         lat=payload.lat,
         lng=payload.lng,
+        media_url=payload.media_url,
     )
     return _to_intake_response(grievance, db)
 

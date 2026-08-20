@@ -136,6 +136,40 @@ def split_departments(text: str, classification: ClassificationResult) -> Depart
     multiple civic departments (e.g. "the road is flooded because of a
     burst pipe" -> Roads + Water Board) and, if so, returns the split.
 
+    NOTE ON CONTRACT AMBIGUITY (flag for the AI pair before final
+    integration — see project doc section 7): the original SIH spec
+    describes each entry as {"department", "sub_issue"}, while a later
+    planning doc describes {"department_id", "sub_issue_description"}.
+    This mock returns {"category", "sub_issue"} instead — a category
+    value (e.g. "water_supply"), not a department name or numeric id —
+    so the caller can route it through the same CATEGORY_TO_DEPARTMENT
+    mapping used everywhere else in the codebase, keeping department
+    routing logic in one place. Confirm the real shape with the AI pair
+    and adjust the caller (app/routers/intake.py) if it differs.
+
     TODO: replace with a real call into ai_service.split_departments.
     """
-    return {"needs_split": False, "departments": []}
+    lowered = (text or "").lower()
+
+    matched: dict = {}
+    for keyword, (cat, subcat) in _KEYWORD_CATEGORY_MAP.items():
+        if keyword in lowered:
+            matched.setdefault(cat, subcat)
+
+    # The primary category from classify_complaint always counts as one
+    # of the departments involved, if it wasn't already keyword-matched.
+    primary_category = classification.get("category") if classification else None
+    if primary_category:
+        matched.setdefault(primary_category, "general")
+
+    if len(matched) < 2:
+        return {"needs_split": False, "departments": []}
+
+    departments: List[DepartmentSplitEntry] = [
+        {
+            "category": cat,
+            "sub_issue": f"{cat.replace('_', ' ').title()} issue: {subcat.replace('_', ' ')}",
+        }
+        for cat, subcat in matched.items()
+    ]
+    return {"needs_split": True, "departments": departments}

@@ -15,6 +15,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.db import SessionLocal
 from app.models import ESCALATABLE_STATUSES, Department, Escalation, Grievance, GrievanceStatus, StatusHistory
+from app.notifications import send_notification
 
 logger = logging.getLogger("grievanceai.scheduler")
 
@@ -67,6 +68,16 @@ def check_overdue_grievances() -> int:
                     changed_by="system",
                     note="Auto-escalated: SLA breached",
                 )
+            )
+            send_notification(
+                db,
+                grievance=grievance,
+                channel="internal",
+                message=(
+                    f"SLA breached for {grievance.tracking_id} "
+                    f"({department_name or 'unassigned'}); escalated to "
+                    f"{escalation_contact or 'unassigned_escalation_contact'}."
+                ),
             )
             escalated_count += 1
 

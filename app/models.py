@@ -209,3 +209,23 @@ class ProcessedMessage(Base):
     processed_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     __table_args__ = (UniqueConstraint("message_id", name="uq_processed_messages_message_id"),)
+
+
+class NotificationLog(Base):
+    """
+    Record of notifications sent (or attempted) for a grievance — e.g. an
+    escalation alert to a department's escalation contact. `status` and
+    `sent_at` reflect the outcome of the actual send attempt once a real
+    notification provider is wired up; for now they're written by the
+    mock in app/notifications.py.
+    """
+    __tablename__ = "notifications_log"
+
+    id = Column(Integer, primary_key=True)
+    grievance_id = Column(Integer, ForeignKey("grievances.id"), nullable=False)
+    channel = Column(String, nullable=False)  # e.g. "whatsapp", "sms", "email", "internal"
+    message = Column(String, nullable=False)
+    sent_at = Column(DateTime(timezone=True), default=utcnow, nullable=False)
+    status = Column(String, nullable=False, default="pending")  # pending|sent|failed
+
+    grievance = relationship("Grievance")

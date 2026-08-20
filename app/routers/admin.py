@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Category, Department, Escalation, Grievance, GrievanceStatus, Priority, StatusHistory
+from app.notifications import send_notification
 from app.schemas import AdminUpdateRequest, EscalateRequest, EscalateResponse, QueueItem
 
 router = APIRouter(tags=["admin"])
@@ -129,6 +130,12 @@ def escalate_grievance(id: int, payload: EscalateRequest, db: Session = Depends(
             changed_by=payload.changed_by or "admin",
             note=reason,
         )
+    )
+    send_notification(
+        db,
+        grievance=grievance,
+        channel="internal",
+        message=f"Grievance {grievance.tracking_id} manually escalated: {reason} (to {escalated_to}).",
     )
     db.commit()
     db.refresh(grievance)
