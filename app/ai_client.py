@@ -1,6 +1,7 @@
 """
 MOCK AI client.
 
+
 Every function here returns realistic, hardcoded data in the EXACT
 shape the real `ai_service` package will return. When that package is
 ready, swap the internals of these functions for real API calls and
