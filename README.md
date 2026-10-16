@@ -66,7 +66,7 @@ curl http://localhost:8000/health
 
 Railway is the easiest option here since it has ready-made templates
 with pgvector already compiled in — no custom Dockerfile needed.
-
+ 
 ### 1. Push your code to GitHub
 
 Railway deploys straight from a GitHub repo.
